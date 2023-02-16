@@ -1,5 +1,5 @@
 [package]
-name = "libbpf-rust-demo"
+name = "file_cloak"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,8 +8,9 @@ edition = "2021"
 [dependencies]
 libbpf-rs = {version="0.19"}
 plain = "0.2"
-time = { version = "0.3", features = ["formatting", "local-offset", "macros"]}
-
 
 [build-dependencies]
 libbpf-cargo = "0.13"
+
+[profile.release]
+opt-level = 'z'

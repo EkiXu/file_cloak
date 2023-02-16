@@ -1,69 +1,93 @@
+use std::env;
 use std::time::Duration;
 
 use plain::Plain;
-use libbpf_rs::{PerfBufferBuilder, Error};
-use time::macros::format_description;
-use time::OffsetDateTime;
+use libbpf_rs::{RingBufferBuilder, Error};
 
 
-mod demo {
-    include!(concat!(env!("OUT_DIR"), "/demo.skel.rs"));
+mod cloak {
+    include!(concat!(env!("OUT_DIR"), "/cloak.skel.rs"));
 }
 
-use demo::*;
+use cloak::*;
 
-unsafe impl Plain for demo_bss_types::event {}
+const TASK_COMM_LEN:usize = 16;
 
-fn handle_event(_cpu: i32, data: &[u8]) {
-    // let mut event = runqslower_bss_types::event::default();
-    let mut event = demo_bss_types::event::default();
+
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct Event {
+    pub payload_len: i32,
+    pub comm: [u8; TASK_COMM_LEN],
+    pub success: bool,
+}
+
+impl Event {
+    pub fn default()->Self{
+        Event{
+            payload_len:0,
+            comm: [0;16],
+            success: false,
+        }
+    }
+}
+
+unsafe impl Plain for Event{
+
+}
+
+
+
+fn rb_handler(data:&[u8]) ->i32 {
+    let mut event = Event::default();
     plain::copy_from_bytes(&mut event, data).expect("Data buffer was too short");
-
-    let now = if let Ok(now) = OffsetDateTime::now_local() {
-        let format = format_description!("[hour]:[minute]:[second]");
-        now.format(&format)
-            .unwrap_or_else(|_| "00:00:00".to_string())
-    } else {
-        "00:00:00".to_string()
-    };
 
     let comm = std::str::from_utf8(&event.comm).unwrap();
 
     println!(
-        "{:8} {:16} {:<7} ",
-        now,
+        "{:16} {:}",
         comm.trim_end_matches(char::from(0)),
-        event.pid,
+        event.success,
     );
-}
 
-fn handle_lost_events(cpu: i32, count: u64) {
-    eprintln!("Lost {count} events on CPU {cpu}");
+    0
 }
 
 fn main() -> Result<(),Error>  {
-    println!("Hello, world!");
+    let args: Vec<String> = env::args().collect();
 
-    let mut skel_builder = DemoSkelBuilder::default();
+    if args.len() < 2 {
+        print!("Usage process_clock <file or directory name>");
+        return Ok(())
+    }
 
-    skel_builder.obj_builder.debug(true);
+    let skel_builder = CloakSkelBuilder::default();
 
+    //skel_builder.obj_builder.debug(true);
 
     let mut open_skel = skel_builder.open()?;
 
+    let target_folder = &args[1];
+
+    // replace it when you want to target a specific process
+    open_skel.rodata().target_ppid = 0;
+
+
+    open_skel.rodata().file_to_hide_len = target_folder.as_bytes().len() as i32;
+    open_skel.rodata().file_to_hide[..target_folder.as_bytes().len()].copy_from_slice(target_folder.as_bytes());
 
     // Begin tracing
     let mut skel = open_skel.load()?;
     skel.attach()?;
 
-    let perf = PerfBufferBuilder::new(skel.maps_mut().events())
-    .sample_cb(handle_event)
-    .lost_cb(handle_lost_events)
-    .build()?;
+    let mut builder = RingBufferBuilder::new();
+    builder.add(skel.maps_mut().rb(), rb_handler).expect("Failed to add ringbuf");
+    let ringbuf = builder.build().expect("Failed to build");
 
     loop {
-        perf.poll(Duration::from_millis(100))?;
+        ringbuf.poll(Duration::from_millis(100))?;
     }
+
 
 }
 
